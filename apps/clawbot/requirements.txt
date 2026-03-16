@@ -1,0 +1,9 @@
+python-telegram-bot
+python-dotenv
+openai
+google-genai
+httpx
+pyautogui
+mss
+Pillow
+flask
