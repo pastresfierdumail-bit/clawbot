@@ -7,11 +7,11 @@ Commandes :
   /report [type]  → consulter les rapports (daily, research, all)
   /memory [query] → consulter la mémoire
   /reset          → remet à zéro la conversation
+  /tasks          → voir les tâches planifiées
   (texte libre)   → envoyé à l'agent Kimi K2
 
 Lancer :
   cd h:/0perso/clawbot
-  pip install -r apps/clawbot/requirements.txt
   python -m apps.telegram_bot
 """
 
@@ -35,7 +35,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent import create_agent
 from core.security import get_quota_status, log_audit
+<<<<<<< HEAD
 from core.scheduler import Scheduler
+=======
+from core.scheduler import Scheduler, load_tasks, add_task, remove_task
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 # ─── Config ───────────────────────────────────────────────────────
 
@@ -44,7 +48,7 @@ load_dotenv(dotenv_path=env_path)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 KIMI_API_KEY = os.getenv("KIMI_API_KEY", "").strip()
-AUTHORIZED_USER_ID = os.getenv("TELEGRAM_USER_ID", "").strip()  # ton user_id Telegram
+AUTHORIZED_USER_ID = os.getenv("TELEGRAM_USER_ID", "").strip()
 
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_BOT_TOKEN manquant dans .env")
@@ -68,6 +72,10 @@ _pending_confirms: dict[int, asyncio.Future] = {}
 
 MEMORY_DIR = Path(__file__).parent.parent / "memory"
 REPORTS_DIR = MEMORY_DIR / "reports"
+
+# Référence globale au bot pour le scheduler
+_bot_instance = None
+_scheduler: Scheduler | None = None
 
 
 # ─── Auth middleware ──────────────────────────────────────────────
@@ -98,7 +106,6 @@ async def confirm_callback_factory(chat_id: int, bot):
         ])
         await bot.send_message(chat_id=chat_id, text=message, reply_markup=keyboard)
 
-        # Attendre la réponse (timeout 60s)
         future = asyncio.get_event_loop().create_future()
         _pending_confirms[chat_id] = future
 
@@ -131,6 +138,18 @@ async def handle_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(text="(expirée)")
 
 
+# ─── Progress callback ───────────────────────────────────────────
+
+async def progress_callback_factory(chat_id: int, bot):
+    """Crée un callback de progression pour l'agent."""
+    async def notify_progress(message: str):
+        try:
+            await bot.send_message(chat_id=chat_id, text=message)
+        except Exception:
+            pass
+    return notify_progress
+
+
 # ─── Handlers ─────────────────────────────────────────────────────
 
 @authorized
@@ -146,6 +165,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status — quota & état\n"
         "/report — consulter les rapports\n"
         "/memory — consulter la mémoire\n"
+        "/tasks — tâches planifiées\n"
         "/reset — nouvelle conversation",
         parse_mode="Markdown",
     )
@@ -157,12 +177,18 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pct = int((quota["used"] / quota["limit"]) * 100) if quota["limit"] > 0 else 0
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
 
+    scheduler_status = "🟢 Actif" if _scheduler and _scheduler._running else "🔴 Inactif"
+    tasks = load_tasks()
+    active_tasks = sum(1 for t in tasks if t.get("active"))
+
     msg = (
         f"📊 **Statut Clawbot**\n\n"
         f"**Tokens aujourd'hui :**\n"
         f"`[{bar}]` {pct}%\n"
         f"{quota['used']:,} / {quota['limit']:,}\n\n"
-        f"**Conversation :** {len(agent.conversation_history)} messages"
+        f"**Conversation :** {len(agent.conversation_history)} messages\n"
+        f"**Scheduler :** {scheduler_status}\n"
+        f"**Tâches actives :** {active_tasks}"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -191,7 +217,6 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = r.read_text(encoding="utf-8")[:300]
         msg += f"**{r.stem}**\n{content}\n\n---\n\n"
 
-    # Tronquer si trop long pour Telegram
     if len(msg) > 4000:
         msg = msg[:4000] + "\n\n... (tronqué)"
 
@@ -212,6 +237,37 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @authorized
+async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Voir et gérer les tâches planifiées."""
+    tasks = load_tasks()
+
+    if not tasks:
+        await update.message.reply_text(
+            "📋 Aucune tâche planifiée.\n\n"
+            "Pour ajouter une tâche, dis-moi simplement ce que tu veux automatiser, "
+            "par exemple : \"Fais une veille technologique tous les jours à 9h\""
+        )
+        return
+
+    msg = "📋 **Tâches planifiées :**\n\n"
+    for t in tasks:
+        status = "🟢" if t.get("active") else "⚪"
+        last = t.get("last_run", "jamais")
+        if last and last != "jamais":
+            last = last[:16].replace("T", " ")
+        msg += (
+            f"{status} **#{t['id']}** — {t['description']}\n"
+            f"   ⏰ {t['schedule']} ({t.get('time', '')})\n"
+            f"   Dernière exécution : {last}\n\n"
+        )
+
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n\n... (tronqué)"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+@authorized
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent.reset_conversation()
     await update.message.reply_text("🔄 Conversation réinitialisée.")
@@ -227,15 +283,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Indicateur de traitement
     thinking = await update.message.reply_text("🧠 Réflexion en cours...")
 
-    # Créer le callback de confirmation
+    # Créer les callbacks
     confirm = await confirm_callback_factory(chat_id, context.bot)
     agent.set_confirm_callback(confirm)
 
+    progress = await progress_callback_factory(chat_id, context.bot)
+    agent.set_progress_callback(progress)
+
     try:
+<<<<<<< HEAD
         # Lancer l'agent (timeout de 10 min pour permettre l'autonomie)
         response = await asyncio.wait_for(agent.run(user_text), timeout=600)
+=======
+        response = await agent.run(user_text)
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
-        await thinking.delete()
+        # Supprimer le message "Réflexion..."
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
 
         # Découper si la réponse est trop longue pour Telegram (4096 chars max)
         if len(response) <= 4000:
@@ -254,15 +321,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
+<<<<<<< HEAD
         if thinking:
             try: await thinking.delete()
             except: pass
+=======
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
         await update.message.reply_text(f"❌ Erreur agent : {str(e)[:500]}")
+
+
+# ─── Scheduler integration ───────────────────────────────────────
+
+async def _scheduler_agent_run(prompt: str) -> str:
+    """Wrapper pour que le scheduler puisse appeler l'agent."""
+    return await agent.run(prompt)
+
+
+async def _scheduler_notify(message: str):
+    """Wrapper pour que le scheduler puisse notifier via Telegram."""
+    if _bot_instance and AUTHORIZED_USER_ID:
+        try:
+            await _bot_instance.send_message(
+                chat_id=int(AUTHORIZED_USER_ID),
+                text=message,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Scheduler notify error: {e}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────
 
 async def post_init(app):
+<<<<<<< HEAD
     """Initialisation juste après le démarrage du bot (dans la boucle asyncio)."""
     # Notifier
     async def notify_user(msg: str):
@@ -278,6 +373,42 @@ async def post_init(app):
     
     logger.info("📅 Scheduler autonome démarré.")
     log_audit("SCHEDULER_START", "Autonomous scheduler active")
+=======
+    """Appelé après l'initialisation du bot."""
+    global _bot_instance, _scheduler
+
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    me = await app.bot.get_me()
+    logger.info(f"[OK] Clawbot @{me.username} is ONLINE and Polling.")
+
+    _bot_instance = app.bot
+
+    # Démarrer le scheduler
+    _scheduler = Scheduler(
+        agent_run_fn=_scheduler_agent_run,
+        notify_fn=_scheduler_notify,
+    )
+    _scheduler.start()
+    logger.info("📅 Scheduler démarré.")
+
+    # Notifier l'utilisateur que le bot est en ligne
+    if AUTHORIZED_USER_ID:
+        try:
+            await app.bot.send_message(
+                chat_id=int(AUTHORIZED_USER_ID),
+                text=(
+                    "🟢 **Clawbot v3 en ligne**\n"
+                    f"Bot : @{me.username}\n"
+                    f"Scheduler : actif\n"
+                    f"Heure : {datetime.now().strftime('%H:%M:%S')}"
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.warning(f"Impossible de notifier au démarrage : {e}")
+
+    log_audit("BOT_START", f"Clawbot v3 @{me.username} started with scheduler")
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 
 def main():
@@ -287,6 +418,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("memory", cmd_memory))
+    app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(handle_confirm_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

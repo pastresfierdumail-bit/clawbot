@@ -1,14 +1,11 @@
 """
 core/agent.py — Boucle agent Kimi K2 avec function calling.
 
-L'agent reçoit un message, appelle Kimi K2 avec les tools disponibles,
-exécute les tool calls, renvoie les résultats à Kimi, et boucle
-jusqu'à obtenir une réponse finale (pas de tool call).
-
-Sécurité :
-- Quota de tokens (journalier)
-- Pas de limite dure d'actions (autonomie) mais safety checks sur chaque action
-- Audit log de tout
+Architecture ReAct : Reason → Act → Observe → boucle.
+- Pruning automatique du contexte quand l'historique dépasse le seuil
+- Retry intelligent avec reflection loop sur les erreurs
+- Callback de progression pour feedback Telegram intermédiaire
+- Audit complet de chaque itération
 """
 
 import json
@@ -23,7 +20,21 @@ from .security import track_tokens, get_quota_status, log_audit
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 SYSTEM_PROMPT = """Tu es Clawbot, un assistant personnel TOTALEMENT AUTONOME qui contrôle une VM Windows.
+=======
+# ─── Seuils de gestion du contexte ────────────────────────────────
+
+MAX_HISTORY_MESSAGES = 40          # Au-delà, on compacte
+COMPACT_KEEP_RECENT = 10          # Messages récents à garder intacts
+MAX_TOOL_RESULT_CHARS = 3000      # Troncature résultats tools
+MAX_CONSECUTIVE_ERRORS = 3        # Erreurs consécutives avant pause réflexion
+DEFAULT_MAX_ITERATIONS = 25       # Sécurité anti-boucle (réduit de 50)
+
+# ─── System prompt amélioré ───────────────────────────────────────
+
+SYSTEM_PROMPT = """Tu es Clawbot, un assistant personnel autonome qui contrôle une VM Windows.
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 TON RÔLE :
 - Exécuter des tâches complexes de bout en bout sans assistance.
@@ -32,7 +43,22 @@ TON RÔLE :
 - PLANIFICATION : Utilise `schedule_task` pour les tâches longues ou récurrentes.
 - CONSISTANCE (KB) : Utilise la Knowledge Base (`kb_update`, `kb_query`) pour structurer ton savoir par **Tâches Globales** et **Sous-Thèmes**. C'est ta mémoire à long terme pour rester cohérent sur des projets complexes.
 
+MÉTHODOLOGIE (OBLIGATOIRE pour les tâches complexes) :
+1. PLANIFIER : Avant d'agir, décompose la tâche en étapes claires
+2. AGIR : Exécute une étape à la fois via les tools
+3. OBSERVER : Lis le résultat de chaque action
+4. ADAPTER : Si une erreur survient, analyse-la et essaie une approche différente
+5. RAPPORTER : En fin de tâche, résume ce qui a été fait
+
+GESTION DES ERREURS :
+- Si un tool retourne une erreur, ANALYSE le message d'erreur avant de réessayer
+- Ne réessaie JAMAIS la même commande identique — modifie ton approche
+- Après 2 échecs sur la même étape, passe à une alternative ou explique le blocage
+- Utilise file_read pour vérifier l'état avant de modifier des fichiers
+- Utilise file_list pour explorer avant de supposer qu'un chemin existe
+
 CAPACITÉS (via tools) :
+<<<<<<< HEAD
 - shell_exec : commandes PowerShell sur la VM.
 - file_read/write/list : gestion de fichiers.
 - screenshot : voir l'écran (analysé par Gemini Vision).
@@ -49,6 +75,24 @@ CONSIGNES DE TRAVAIL :
 2. ACTION : Enchaîne les tool calls. Après chaque étape importante, mets à jour la KB (`kb_update`).
 3. VÉRIFICATION : Après une action UI, fais un `screenshot` pour vérifier le résultat.
 4. FINALISATION : Envoie un résumé clair à l'utilisateur et sauvegarde un rapport.
+=======
+- shell_exec : commandes PowerShell sur la VM (timeout configurable)
+- file_read/write/list : gestion de fichiers
+- screenshot : voir l'écran (analysé par Gemini Vision)
+- app_launch : lancer Blender, VS Code, Chrome, Unreal, n8n, Notion
+- git_command : opérations git
+- search_web : recherche web
+- memory_save/recall : mémoire persistante
+- report_save : sauvegarder des rapports (consultables par l'utilisateur)
+
+RÈGLES :
+- Réponds toujours en français
+- Sois concis mais complet
+- Pour les opérations longues (pip install, git clone...), utilise un timeout > 60
+- Après une recherche web, sauvegarde un résumé dans memory_save(category="research")
+- En fin de tâche complexe, crée un rapport avec report_save
+- Ne tourne pas en boucle : si quelque chose échoue 2 fois, explique et propose des alternatives
+>>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 BASE DE TRAVAIL : C:\\Openclaw
 RÉPONSES : Toujours en français, ton amical et professionnel.
@@ -66,29 +110,77 @@ class Agent:
         self.model = model
         self.conversation_history: list[dict] = []
         self._confirm_callback: Optional[Callable[[str], Awaitable[bool]]] = None
+        self._progress_callback: Optional[Callable[[str], Awaitable[None]]] = None
 
     def set_confirm_callback(self, callback: Callable[[str], Awaitable[bool]]):
-        """
-        Définit le callback pour les confirmations (depuis Telegram).
-        callback(message: str) -> bool (True = confirmé, False = refusé)
-        """
         self._confirm_callback = callback
 
+    def set_progress_callback(self, callback: Callable[[str], Awaitable[None]]):
+        """Callback pour notifier l'utilisateur de la progression."""
+        self._progress_callback = callback
+
     def reset_conversation(self):
-        """Remet à zéro l'historique de conversation."""
         self.conversation_history = []
 
-    async def run(self, user_message: str, max_iterations: int = 50) -> str:
-        """
-        Exécute la boucle agent pour un message utilisateur.
+    async def _notify_progress(self, message: str):
+        """Envoie un message de progression si le callback est défini."""
+        if self._progress_callback:
+            try:
+                await self._progress_callback(message)
+            except Exception:
+                pass  # Ne pas bloquer l'agent si la notif échoue
 
+    def _compact_history(self):
+        """
+        Compacte l'historique quand il dépasse MAX_HISTORY_MESSAGES.
+        Garde les COMPACT_KEEP_RECENT derniers messages intacts,
+        résume les anciens en un seul message système.
+        """
+        if len(self.conversation_history) <= MAX_HISTORY_MESSAGES:
+            return
+
+        old_messages = self.conversation_history[:-COMPACT_KEEP_RECENT]
+        recent_messages = self.conversation_history[-COMPACT_KEEP_RECENT:]
+
+        # Construire un résumé des anciens messages
+        summary_parts = []
+        for msg in old_messages:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if role == "user":
+                summary_parts.append(f"[USER] {content[:200]}")
+            elif role == "assistant" and content:
+                summary_parts.append(f"[ASSISTANT] {content[:200]}")
+            elif role == "tool":
+                summary_parts.append(f"[TOOL RESULT] {content[:100]}")
+
+        summary = "\n".join(summary_parts[-15:])  # Garder les 15 dernières entrées du résumé
+
+        # Remplacer l'historique par le résumé + messages récents
+        self.conversation_history = [
+            {
+                "role": "user",
+                "content": f"[CONTEXTE PRÉCÉDENT — résumé automatique]\n{summary}\n[FIN DU CONTEXTE]",
+            }
+        ] + recent_messages
+
+        logger.info(
+            f"Historique compacté : {len(old_messages)} anciens → résumé, "
+            f"{len(recent_messages)} récents conservés"
+        )
+
+    async def run(self, user_message: str, max_iterations: int = DEFAULT_MAX_ITERATIONS) -> str:
+        """
+        Exécute la boucle agent ReAct pour un message utilisateur.
         Retourne la réponse finale de l'agent (texte).
-        max_iterations : sécurité anti-boucle infinie (mais élevé pour l'autonomie).
         """
         # Check quota
         quota = get_quota_status()
         if quota["remaining"] <= 0:
             return f"⚠️ Quota journalier atteint ({quota['used']}/{quota['limit']} tokens). Réessaie demain."
+
+        # Compacter l'historique si nécessaire
+        self._compact_history()
 
         # Ajouter le message utilisateur
         self.conversation_history.append({
@@ -126,10 +218,15 @@ class Agent:
 
         iteration = 0
         total_tokens = 0
+        consecutive_errors = 0
 
         while iteration < max_iterations:
             iteration += 1
             logger.info(f"Agent iteration {iteration}/{max_iterations}")
+
+            # Feedback intermédiaire (User feature)
+            if self._progress_callback and iteration > 1 and iteration % 3 == 0:
+                await self._notify_progress(f"⏳ Étape {iteration}/{max_iterations} en cours...")
 
             # Appel Kimi K2 avec retries (Self-Healing V5)
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.conversation_history
@@ -143,20 +240,20 @@ class Agent:
                         messages=messages,
                         tools=TOOLS,
                         tool_choice="auto",
-                        timeout=90.0, # Augmenté un peu
+                        timeout=90.0,
                     )
                     break # Succès
                 except Exception as e:
+                    error_msg = str(e)
                     if attempt < max_retries:
                         wait_time = 2 ** attempt
-                        logger.warning(f"⚠️ Erreur API Kimi (tentative {attempt+1}/{max_retries}): {e}. Nouvel essai dans {wait_time}s...")
-                        log_audit("API_RETRY", f"attempt={attempt+1}, error={str(e)[:100]}")
+                        logger.warning(f"⚠️ Erreur API Kimi (tentative {attempt+1}/{max_retries}): {error_msg}. Nouvel essai dans {wait_time}s...")
+                        log_audit("API_RETRY", f"attempt={attempt+1}, error={error_msg[:100]}")
                         await asyncio.sleep(wait_time)
                     else:
-                        error_msg = f"❌ Erreur API Kimi persistante après {max_retries} essais : {str(e)}"
-                        logger.error(error_msg)
-                        log_audit("API_ERROR", str(e))
-                        return error_msg
+                        logger.error(f"❌ Erreur API Kimi persistante : {error_msg}")
+                        log_audit("API_ERROR", error_msg)
+                        return f"❌ Erreur API Kimi : {error_msg}"
 
             # Track tokens
             if response.usage:
@@ -191,21 +288,29 @@ class Agent:
                 return final
 
             # Exécuter chaque tool call
+            has_error_this_round = False
+
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
                 try:
                     fn_args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
                     fn_args = {}
+                    log_audit("JSON_PARSE_ERROR", f"tool={fn_name}, raw={tool_call.function.arguments[:200]}")
 
-                logger.info(f"Tool call: {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:100]})")
+                logger.info(f"Tool call [{iteration}]: {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:100]})")
 
                 # Exécuter le tool
                 result = await execute_tool(fn_name, fn_args, self._confirm_callback)
 
-                # Tronquer les résultats trop longs pour ne pas exploser le contexte
-                if len(result) > 3000:
-                    result = result[:3000] + "\n... (tronqué)"
+                # Détecter les erreurs dans le résultat
+                is_error = result.startswith("❌") or result.startswith("⛔") or result.startswith("⏰")
+                if is_error:
+                    has_error_this_round = True
+
+                # Tronquer les résultats trop longs
+                if len(result) > MAX_TOOL_RESULT_CHARS:
+                    result = result[:MAX_TOOL_RESULT_CHARS] + "\n... (tronqué)"
 
                 # Ajouter le résultat dans l'historique
                 self.conversation_history.append({
@@ -214,8 +319,34 @@ class Agent:
                     "content": result,
                 })
 
-        # Si on arrive ici, max_iterations atteint
-        return f"⚠️ L'agent a atteint {max_iterations} itérations. Dernière action enregistrée dans les logs."
+            # Gestion des erreurs consécutives
+            if has_error_this_round:
+                consecutive_errors += 1
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    # Injecter un message de réflexion pour forcer l'agent à changer d'approche
+                    self.conversation_history.append({
+                        "role": "user",
+                        "content": (
+                            f"[SYSTÈME] ⚠️ {consecutive_errors} erreurs consécutives détectées. "
+                            "STOP — Ne réessaie PAS la même approche. "
+                            "Analyse les erreurs ci-dessus, explique le problème à l'utilisateur, "
+                            "et propose une alternative concrète ou demande des précisions."
+                        ),
+                    })
+                    consecutive_errors = 0  # Reset pour laisser une chance à la nouvelle approche
+            else:
+                consecutive_errors = 0
+
+            # Compacter si l'historique a trop grossi pendant la boucle
+            if len(self.conversation_history) > MAX_HISTORY_MESSAGES + 10:
+                self._compact_history()
+
+        # Max iterations atteint
+        log_audit("MAX_ITERATIONS", f"iterations={max_iterations}, tokens={total_tokens}")
+        return (
+            f"⚠️ L'agent a atteint {max_iterations} itérations sans terminer.\n"
+            "La tâche était peut-être trop complexe. Essaie de la découper en sous-tâches."
+        )
 
 
 # ─── Factory ──────────────────────────────────────────────────────
