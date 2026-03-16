@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent import create_agent
 from core.security import get_quota_status, log_audit
+from core.scheduler import Scheduler
 
 # ─── Config ───────────────────────────────────────────────────────
 
@@ -75,6 +76,7 @@ def authorized(func):
     """Décorateur : vérifie que l'utilisateur est autorisé."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
+        logger.info(f"Auth check: user_id={user_id} (Authorized: {AUTHORIZED_USER_ID})")
         if AUTHORIZED_USER_ID and user_id != AUTHORIZED_USER_ID:
             await update.message.reply_text("⛔ Accès non autorisé.")
             log_audit("UNAUTHORIZED", f"user_id={user_id}")
@@ -220,6 +222,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Message libre → envoyé à l'agent Kimi K2."""
     user_text = update.message.text
     chat_id = update.message.chat_id
+    logger.info(f"Incoming message from {chat_id}: {user_text}")
 
     # Indicateur de traitement
     thinking = await update.message.reply_text("🧠 Réflexion en cours...")
@@ -229,8 +232,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent.set_confirm_callback(confirm)
 
     try:
-        # Lancer l'agent
-        response = await agent.run(user_text)
+        # Lancer l'agent (timeout de 10 min pour permettre l'autonomie)
+        response = await asyncio.wait_for(agent.run(user_text), timeout=600)
 
         await thinking.delete()
 
@@ -242,16 +245,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in chunks:
                 await update.message.reply_text(chunk)
 
+    except asyncio.TimeoutError:
+        await thinking.delete()
+        await update.message.reply_text(
+            "⏰ **Le délai de réflexion a été dépassé (10 min).**\n\n"
+            "La tâche est peut-être trop complexe ou l'IA est bloquée. "
+            "Vous pouvez essayer de diviser votre demande ou utiliser `/reset` si le bot semble confus."
+        )
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
-        await thinking.delete()
+        if thinking:
+            try: await thinking.delete()
+            except: pass
         await update.message.reply_text(f"❌ Erreur agent : {str(e)[:500]}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────
 
+async def post_init(app):
+    """Initialisation juste après le démarrage du bot (dans la boucle asyncio)."""
+    # Notifier
+    async def notify_user(msg: str):
+        if AUTHORIZED_USER_ID:
+            try:
+                await app.bot.send_message(chat_id=int(AUTHORIZED_USER_ID), text=msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Error notifying user: {e}")
+                
+    # Démarrer le scheduler
+    scheduler = Scheduler(agent_run_fn=agent.run, notify_fn=notify_user)
+    scheduler.start()
+    
+    logger.info("📅 Scheduler autonome démarré.")
+    log_audit("SCHEDULER_START", "Autonomous scheduler active")
+
+
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))

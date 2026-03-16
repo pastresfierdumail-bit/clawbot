@@ -253,6 +253,90 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task",
+            "description": "Schedule a task to be executed later by the agent. Useful for recurring checks, long-running processes, or follow-ups.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "The task description for the agent to execute"
+                    },
+                    "schedule": {
+                        "type": "string",
+                        "enum": ["daily", "hourly", "once"],
+                        "description": "Frequency"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Time in HH:MM format (for daily schedule)"
+                    }
+                },
+                "required": ["description", "schedule"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_list",
+            "description": "List all currently scheduled autonomous tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kb_update",
+            "description": "Add or update knowledge in the Hierarchical Knowledge Base. Organizes info by global task and sub-theme for long-term consistency.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_name": {
+                        "type": "string",
+                        "description": "Global task name (e.g., 'Blender Navigator')"
+                    },
+                    "theme": {
+                        "type": "string",
+                        "description": "Sub-theme or component (e.g., 'Vision Logic')"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Fact, insight, or status update to remember"
+                    }
+                },
+                "required": ["task_name", "theme", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kb_query",
+            "description": "Query the Knowledge Base for context on a specific task or theme.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_name": {
+                        "type": "string",
+                        "description": "Filter by global task (optional)"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search term to find relevant knowledge"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 # Noms des tools pour lookup rapide

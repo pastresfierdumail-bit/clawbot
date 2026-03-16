@@ -11,6 +11,7 @@ import subprocess
 import base64
 import time
 import logging
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -67,11 +68,11 @@ async def execute_tool(tool_name: str, args: dict, confirm_callback=None) -> str
         if tool_name == "shell_exec":
             return await _shell_exec(args, confirm_callback)
         elif tool_name == "file_read":
-            return _file_read(args)
+            return await asyncio.to_thread(_file_read, args)
         elif tool_name == "file_write":
-            return _file_write(args)
+            return await asyncio.to_thread(_file_write, args)
         elif tool_name == "file_list":
-            return _file_list(args)
+            return await asyncio.to_thread(_file_list, args)
         elif tool_name == "screenshot":
             return await _screenshot(args)
         elif tool_name == "app_launch":
@@ -81,11 +82,19 @@ async def execute_tool(tool_name: str, args: dict, confirm_callback=None) -> str
         elif tool_name == "search_web":
             return await _search_web(args)
         elif tool_name == "memory_save":
-            return _memory_save(args)
+            return await asyncio.to_thread(_memory_save, args)
         elif tool_name == "memory_recall":
-            return _memory_recall(args)
+            return await asyncio.to_thread(_memory_recall, args)
         elif tool_name == "report_save":
-            return _report_save(args)
+            return await asyncio.to_thread(_report_save, args)
+        elif tool_name == "schedule_task":
+            return await asyncio.to_thread(_schedule_task, args)
+        elif tool_name == "task_list":
+            return await asyncio.to_thread(_task_list, args)
+        elif tool_name == "kb_update":
+            return await asyncio.to_thread(_kb_update, args)
+        elif tool_name == "kb_query":
+            return await asyncio.to_thread(_kb_query, args)
         else:
             return f"Erreur : tool '{tool_name}' inconnu."
     except Exception as e:
@@ -115,7 +124,8 @@ async def _shell_exec(args: dict, confirm_callback) -> str:
             return "❌ Action annulée par l'utilisateur."
 
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["powershell", "-Command", command],
             capture_output=True, text=True,
             cwd=working_dir, timeout=timeout
@@ -296,7 +306,8 @@ async def _git_command(args: dict, confirm_callback) -> str:
             return "⚠️ git push/reset nécessite confirmation."
 
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["git"] + command.split(),
             capture_output=True, text=True,
             cwd=repo_path, timeout=30
@@ -316,7 +327,8 @@ async def _search_web(args: dict) -> str:
     try:
         # Utilise PowerShell + Invoke-WebRequest pour DuckDuckGo Lite
         cmd = f'(Invoke-WebRequest -Uri "https://lite.duckduckgo.com/lite/?q={query}" -UseBasicParsing).Content'
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["powershell", "-Command", cmd],
             capture_output=True, text=True, timeout=15
         )
@@ -414,3 +426,92 @@ def _report_save(args: dict) -> str:
 
     log_audit("REPORT", f"{report_type}: {title}")
     return f"📝 Rapport sauvegardé : {filename}"
+
+
+def _schedule_task(args: dict) -> str:
+    from .scheduler import add_task
+    desc = args["description"]
+    sched = args["schedule"]
+    time_str = args.get("time", "09:00")
+    
+    task = add_task(desc, sched, time_str)
+    return f"📅 Tâche planifiée #{task['id']} : {desc} ({sched} at {time_str})"
+
+
+def _task_list(args: dict) -> str:
+    from .scheduler import load_tasks
+    tasks = load_tasks()
+    if not tasks:
+        return "📅 Aucune tâche planifiée."
+    
+    res = "📅 **Tâches planifiées :**\n"
+    for t in tasks:
+        status = "✅ Active" if t["active"] else "❌ Inactive"
+        res += f"- #{t['id']} : {t['description']} ({t['schedule']}) [{status}]\n"
+    return res
+
+
+def _kb_update(args: dict) -> str:
+    task_name = args["task_name"]
+    theme = args["theme"]
+    content = args["content"]
+    
+    kb_file = MEMORY_DIR / "kb.json"
+    MEMORY_DIR.mkdir(exist_ok=True)
+    
+    kb = {"tasks": {}}
+    if kb_file.exists():
+        with open(kb_file, "r", encoding="utf-8") as f:
+            kb = json.load(f)
+            
+    if "tasks" not in kb: kb["tasks"] = {}
+    if task_name not in kb["tasks"]:
+        kb["tasks"][task_name] = {"description": "", "themes": {}}
+    
+    if theme not in kb["tasks"][task_name]["themes"]:
+        kb["tasks"][task_name]["themes"][theme] = {"items": []}
+        
+    kb["tasks"][task_name]["themes"][theme]["items"].append({
+        "content": content,
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    # Limiter à 50 items par thème pour éviter la surcharge
+    kb["tasks"][task_name]["themes"][theme]["items"] = kb["tasks"][task_name]["themes"][theme]["items"][-50:]
+    
+    with open(kb_file, "w", encoding="utf-8") as f:
+        json.dump(kb, f, indent=2, ensure_ascii=False)
+        
+    log_audit("KB_UPDATE", f"{task_name}/{theme}")
+    return f"🧠 Savoir enregistré dans {task_name} > {theme}."
+
+
+def _kb_query(args: dict) -> str:
+    task_filter = args.get("task_name")
+    query = args["query"].lower()
+    
+    kb_file = MEMORY_DIR / "kb.json"
+    if not kb_file.exists():
+        return "🧠 La base de connaissances est vide."
+        
+    with open(kb_file, "r", encoding="utf-8") as f:
+        kb = json.load(f)
+        
+    results = []
+    tasks = kb.get("tasks", {})
+    
+    for t_name, t_data in tasks.items():
+        if task_filter and task_filter.lower() not in t_name.lower():
+            continue
+            
+        for theme, theme_data in t_data.get("themes", {}).items():
+            for item in theme_data.get("items", []):
+                if query in item["content"].lower() or query in theme.lower() or query in t_name.lower():
+                    results.append(f"**[{t_name} / {theme}]** ({item['timestamp'][:10]})\n{item['content']}")
+                    
+    if not results:
+        return f"🔍 Aucun savoir trouvé pour '{query}'."
+        
+    # Retourner les 10 plus récents/pertinents
+    res_text = "\n\n---\n\n".join(results[-10:])
+    return f"🧠 **Savoirs trouvés :**\n\n{res_text}"
