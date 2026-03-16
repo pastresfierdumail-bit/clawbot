@@ -131,7 +131,12 @@ async def tutor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    if not async_client and not gemini_client: return
+    user_id = update.effective_user.id
+    logger.info(f"Message reçu de {user_id}: {user_text}")
+    
+    if not async_client and not gemini_client:
+        logger.warning("Aucun client IA configuré.")
+        return
 
     thinking = await update.message.reply_text("⏳ *Réflexion...*")
     try:
@@ -168,8 +173,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {e}")
 
+async def post_init(app):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    me = await app.bot.get_me()
+    logger.info(f"[OK] Clawbot @{me.username} is ONLINE and Polling.")
+
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tutor", tutor))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
