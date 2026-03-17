@@ -2,6 +2,7 @@
 python-telegram-bot>=21.0
 python-dotenv
 openai>=1.0
+aiohttp>=3.9
 google-genai>=1.0
 mss
 Pillow

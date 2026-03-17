@@ -49,9 +49,6 @@ AUTHORIZED_USER_ID = os.getenv("TELEGRAM_USER_ID", "").strip()
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_BOT_TOKEN manquant dans .env")
     sys.exit(1)
-if not KIMI_API_KEY:
-    print("❌ KIMI_API_KEY manquant dans .env")
-    sys.exit(1)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,7 +58,27 @@ logger = logging.getLogger(__name__)
 
 # ─── Agent singleton ─────────────────────────────────────────────
 
-agent = create_agent(api_key=KIMI_API_KEY)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip() or KIMI_API_KEY
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip() or "kimi-k2-0905-preview"
+
+if LLM_PROVIDER == "onemin":
+    from core.onemin_client import AsyncOneMinClient
+    if not LLM_API_KEY:
+        print("❌ LLM_API_KEY manquant dans .env (requis pour 1min.ai)")
+        sys.exit(1)
+    client = AsyncOneMinClient(api_key=LLM_API_KEY)
+    logger.info(f"LLM: provider=1min.ai, model={LLM_MODEL}")
+else:
+    from openai import AsyncOpenAI
+    LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or "https://api.moonshot.ai/v1"
+    if not LLM_API_KEY:
+        print("❌ KIMI_API_KEY ou LLM_API_KEY manquant dans .env")
+        sys.exit(1)
+    client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    logger.info(f"LLM: provider=openai, model={LLM_MODEL}, base_url={LLM_BASE_URL[:40]}...")
+
+agent = create_agent(client=client, model=LLM_MODEL)
 
 # Store pour les confirmations en attente
 _pending_confirms: dict[int, asyncio.Future] = {}

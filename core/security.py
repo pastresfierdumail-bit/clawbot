@@ -106,7 +106,7 @@ def check_path_access(path: str) -> dict:
 
 # ─── Quota de tokens ─────────────────────────────────────────────
 
-DEFAULT_DAILY_TOKEN_QUOTA = 500_000  # tokens/jour — ajustable
+DEFAULT_DAILY_TOKEN_QUOTA = int(os.getenv("DAILY_TOKEN_QUOTA", "2000000"))  # tokens/jour — configurable via .env
 
 def _load_quota() -> dict:
     if QUOTA_FILE.exists():
