@@ -12,8 +12,6 @@ import json
 import logging
 from typing import Optional, Callable, Awaitable
 
-from openai import AsyncOpenAI
-
 from .tools import TOOLS
 from .executor import execute_tool
 from .security import track_tokens, get_quota_status, log_audit
@@ -102,11 +100,10 @@ RÉPONSES : Toujours en français, ton amical et professionnel.
 class Agent:
     def __init__(
         self,
-        api_key: str,
-        base_url: str = "https://api.moonshot.ai/v1",
+        client,
         model: str = "kimi-k2-0905-preview",
     ):
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = client
         self.model = model
         self.conversation_history: list[dict] = []
         self._confirm_callback: Optional[Callable[[str], Awaitable[bool]]] = None
@@ -351,6 +348,6 @@ class Agent:
 
 # ─── Factory ──────────────────────────────────────────────────────
 
-def create_agent(api_key: str, **kwargs) -> Agent:
-    """Crée une instance d'agent avec les paramètres par défaut."""
-    return Agent(api_key=api_key, **kwargs)
+def create_agent(client, model: str = "kimi-k2-0905-preview") -> Agent:
+    """Crée une instance d'agent avec un client pré-construit."""
+    return Agent(client=client, model=model)
