@@ -377,12 +377,6 @@ async def _search_web(args: dict) -> str:
     num = min(args.get("num_results", 5), 10)
 
     try:
-<<<<<<< HEAD
-        # Utilise PowerShell + Invoke-WebRequest pour DuckDuckGo Lite
-        cmd = f'(Invoke-WebRequest -Uri "https://lite.duckduckgo.com/lite/?q={query}" -UseBasicParsing).Content'
-        result = await asyncio.to_thread(
-            subprocess.run,
-=======
         import re
 
         # Méthode 1 : DuckDuckGo HTML (plus fiable que Lite)
@@ -392,8 +386,8 @@ async def _search_web(args: dict) -> str:
             f'(Invoke-WebRequest -Uri "https://html.duckduckgo.com/html/?q={encoded_query}" '
             f'-UseBasicParsing -TimeoutSec 10).Content'
         )
-        result = subprocess.run(
->>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["powershell", "-Command", cmd],
             capture_output=True, text=True, timeout=20
         )
@@ -405,7 +399,8 @@ async def _search_web(args: dict) -> str:
                 f'(Invoke-WebRequest -Uri "https://lite.duckduckgo.com/lite/?q={encoded_query}" '
                 f'-UseBasicParsing -TimeoutSec 10).Content'
             )
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["powershell", "-Command", cmd_lite],
                 capture_output=True, text=True, timeout=20
             )
@@ -413,22 +408,12 @@ async def _search_web(args: dict) -> str:
                 return f"❌ Recherche échouée. Erreur : {result.stderr[:200]}"
 
         content = result.stdout
-
-        # Parse des résultats DuckDuckGo HTML
-        # Extraire les blocs de résultats
         results = []
 
-        # Pattern pour les liens de résultats
-        links = re.findall(
-            r'<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
-            content, re.DOTALL
-        )
-        snippets = re.findall(
-            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-            content, re.DOTALL
-        )
+        # Parse des résultats DuckDuckGo HTML
+        links = re.findall(r'<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', content, re.DOTALL)
+        snippets = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', content, re.DOTALL)
 
-        # Fallback : pattern alternatif
         if not links:
             links = re.findall(r'<a[^>]+href="([^"]+)"[^>]*class="result-link"[^>]*>(.*?)</a>', content)
             snippets = re.findall(r'<td class="result-snippet">(.*?)</td>', content, re.DOTALL)

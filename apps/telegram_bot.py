@@ -35,11 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent import create_agent
 from core.security import get_quota_status, log_audit
-<<<<<<< HEAD
-from core.scheduler import Scheduler
-=======
 from core.scheduler import Scheduler, load_tasks, add_task, remove_task
->>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 # ─── Config ───────────────────────────────────────────────────────
 
@@ -308,12 +304,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent.set_progress_callback(progress)
 
     try:
-<<<<<<< HEAD
         # Lancer l'agent (timeout de 10 min pour permettre l'autonomie)
         response = await asyncio.wait_for(agent.run(user_text), timeout=600)
-=======
-        response = await agent.run(user_text)
->>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
         # Supprimer le message "Réflexion..."
         try:
@@ -338,16 +330,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
-<<<<<<< HEAD
         if thinking:
             try: await thinking.delete()
             except: pass
-=======
-        try:
-            await thinking.delete()
-        except Exception:
-            pass
->>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
         await update.message.reply_text(f"❌ Erreur agent : {str(e)[:500]}")
 
 
@@ -374,23 +359,6 @@ async def _scheduler_notify(message: str):
 # ─── Main ─────────────────────────────────────────────────────────
 
 async def post_init(app):
-<<<<<<< HEAD
-    """Initialisation juste après le démarrage du bot (dans la boucle asyncio)."""
-    # Notifier
-    async def notify_user(msg: str):
-        if AUTHORIZED_USER_ID:
-            try:
-                await app.bot.send_message(chat_id=int(AUTHORIZED_USER_ID), text=msg, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Error notifying user: {e}")
-                
-    # Démarrer le scheduler
-    scheduler = Scheduler(agent_run_fn=agent.run, notify_fn=notify_user)
-    scheduler.start()
-    
-    logger.info("📅 Scheduler autonome démarré.")
-    log_audit("SCHEDULER_START", "Autonomous scheduler active")
-=======
     """Appelé après l'initialisation du bot."""
     global _bot_instance, _scheduler
 
@@ -425,7 +393,6 @@ async def post_init(app):
             logger.warning(f"Impossible de notifier au démarrage : {e}")
 
     log_audit("BOT_START", f"Clawbot v3 @{me.username} started with scheduler")
->>>>>>> 65e15227f670b7ed6418beb63a3d01eb4021d908
 
 
 def main():
